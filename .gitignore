@@ -1,9 +1,3 @@
-/df_fair
-/df_fair_copy
-/df_fixed
-/df_fixed_copy
-/df_sampling_uniform
-/df_sampling_uniform_copy
-/df_static_mle
-/df_static_mle_copy
 /__pycache__
+
+TODO.md

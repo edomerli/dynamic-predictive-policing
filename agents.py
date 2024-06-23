@@ -1,34 +1,28 @@
 
 import numpy as np
-# import pymc as pm
-import pytensor
-import pytensor.tensor as pt
-# from pymc.pytensorf import collect_default_updates
 from scipy.stats import poisson
-import time
-
 import utils
 import copy
 
 from models import StaticCrimeMLEModel
 
-# TODO: remove, with imports above
-# LOG_PYMC = False
 
 class FixedUniformAgent():
+    """Baseline agent that uniformly distributes resources among the areas, with a fixed action for the entire simulation."""
+    # Decided to remove it from the paper, left it here in case it came useful in the future
     def __init__(self, resources, areas):
-
         self.resources = resources
         self.areas = areas
         self.action = np.array([resources//areas for _ in range(areas)], dtype=int)
 
     def seed(self, seed):
-        np.random.seed(seed)    # no sources of randomness here
+        np.random.seed(seed)    # note: no sources of randomness here
 
     def act(self, state, timestep):
         return self.action, {}
 
 class SamplingUniformAgent():
+    """Baseline agent that uniformly distributes resources among the areas, sampling a new action at each timestep."""
     def __init__(self, resources, areas):
         self.resources = resources
         self.areas = areas
@@ -37,13 +31,23 @@ class SamplingUniformAgent():
         np.random.seed(seed)
 
     def act(self, state, timestep):
-        return np.random.multinomial(self.resources, np.ones(self.areas) / self.areas, ), {}
-    
+        return np.random.multinomial(self.resources, np.ones(self.areas) / self.areas), {}
 
-# TODO: o modificare questo agent, o farne uno nuovo, che faccia learning/MLE e poi usi sempre la stessa azione ottenuta dalla distribuzione
-#       delle lambda imparate
+
 class StaticMLEAgent():
+    """Agent that computes the MLE of the lambda parameters of the Poisson distributions for each area,
+       and samples actions according to the MLE lambdas at each timestep after a burn-in period.
+    """
     def __init__(self, resources, areas, burnin_steps, max_crimes, mle_interval):
+        """Constructor
+
+        Args:
+            resources (int): number of patrols available
+            areas (int): number of areas
+            burnin_steps (int): number of initial steps used to observe and allocate uniformly at random
+            max_crimes (int): upper bound on number of crimes
+            mle_interval (int): frequency of steps at which to compute estimated lambdas using MLE
+        """
         self.resources = resources
         self.areas = areas
         self.burnin_steps = burnin_steps
@@ -65,6 +69,7 @@ class StaticMLEAgent():
                 self.dataset['crimes'][area].append(state[area])
 
         if timestep < self.burnin_steps:
+            # sample uniformly at random during burnin period
             action = np.random.multinomial(self.resources, np.ones(self.areas) / self.areas)
             for area in range(self.areas):
                 self.dataset['actions'][area].append(action[area])
@@ -72,10 +77,10 @@ class StaticMLEAgent():
             info_agent = {}
 
         else:
-        
             if timestep % self.mle_interval == 0 or timestep == self.burnin_steps:
                 self.lambdas = self.compute_mle_lambdas()
 
+            # sample according to MLE lambdas
             action = np.random.multinomial(self.resources, self.lambdas / np.sum(self.lambdas))
             for area in range(self.areas):
                 self.dataset['actions'][area].append(action[area])
@@ -88,10 +93,9 @@ class StaticMLEAgent():
             
     
     def compute_mle_lambdas(self):
-        # compute MLE
         lambdas = np.zeros(self.areas)
         for area in range(self.areas):
-            initial_lambda = np.mean(self.dataset['crimes'][area])
+            initial_lambda = np.mean(self.dataset['crimes'][area])  # prior lambda is just the mean of the crimes observed in the area
             model = StaticCrimeMLEModel(
                 np.array([(self.dataset['crimes'][area][i], self.dataset['actions'][area][i]) for i in range(len(self.dataset['crimes'][area]))]),
             )
@@ -101,129 +105,22 @@ class StaticMLEAgent():
             
         return lambdas
 
-    ### OLD VERSION USING PYMC ###  
-    # def compute_mle_lambdas(self):
-    #     # compute MLE
-    #     with pm.Model(coords={'idx': np.arange(self.areas)}) as model:
-    #         lambdas = pm.Uniform('lambdas', 0, self.max_crimes, dims=('idx',))
-    #         crimes = pm.Poisson('crimes', lambdas)
-    #         obs_crimes = pm.Deterministic("obs_crimes", pm.math.minimum(crimes, self.dataset['actions']), observed=self.dataset['crimes'])
-
-    #         trace = pm.sample(draws=1000, tune=1000, cores=1, chains=4, progressbar=LOG_PYMC)
-    #         pred_lambdas = trace.posterior['lambdas'].mean(axis=(0, 1)).to_numpy()
-
-    #     return pred_lambdas
-    ### ###
-
-
-### OLD VERSION USING PYMC ###
-# def crime_dist(lambdas_init, actions, dynamic_factor, max_crimes, size):
-#     # TODO: actions to 
-#     def crime_step(action, lambdas, dynamic_factor, max_crimes):
-#         # TODO: se il problema di questo modellamento è che non posso clippare lambda a zero (perchè poisson prende lambda > 0) devo fixarlo anche negli altri
-#         #       posti con un min_lambda_value = e.g. 0.01
-#         lambdas = pm.math.clip(lambdas - dynamic_factor * action + dynamic_factor * pm.math.eq(action, 0), 0.01, max_crimes)
-#         crimes = pm.Poisson.dist(lambdas)
-
-#         return (lambdas, crimes), collect_default_updates([crimes])
-    
-#     [result_lambdas, result_crimes], updates = pytensor.scan(
-#         fn=crime_step, 
-#         sequences=[actions],
-#         outputs_info=[lambdas_init, None],
-#         non_sequences=[dynamic_factor, max_crimes],
-#         n_steps=actions.shape[0],
-#         strict=True)
-    
-#     return result_crimes
-### ###
-
-
-class DynamicMLEAgent():
-    def __init__(self, resources, areas, burnin_steps, max_crimes, dynamic_factor, mle_interval):
-        self.resources = resources
-        self.areas = areas
-        self.burnin_steps = burnin_steps
-        self.max_crimes = max_crimes
-        self.dynamic_factor = dynamic_factor
-        self.mle_interval = mle_interval    # TODO: usa mle_interval in act per fare il sampling solo ogni mle_interval timesteps
-
-        self.dataset = {'crimes': [], 'actions': []}
-
-    ### OLD VERSION USING PYMC ###
-    # def act(self, state, timestep):
-    #     # update dataset
-    #     self.dataset['crimes'].append(state)
-
-    #     if timestep < self.burnin_steps:
-    #         burnin_action = np.random.multinomial(self.resources, np.ones(self.areas) / self.areas)
-    #         self.dataset['actions'].append(burnin_action)
-    #         return burnin_action, {}
-        
-    #     coords = {'areas': np.arange(self.areas), 
-    #               'steps': np.arange(len(self.dataset['crimes'])-1), 
-    #               'observations': np.arange(len(self.dataset['crimes']))
-    #               }
-    #     # compute MLE
-    #     # TODO: idea -> potrei fare il modello cosi in init, tenere la lunghezza fissa a tipo 100 cosi da non far esplodere la 
-    #     #       computation complexity (costante nella size dell'input) e poi, in act, solo settare le ultime 100 variabili + fare sampling
-    #     #       (per velocizzare, potrei provare di accorciare la lunghezza da 100 a tipo 50 e vedere come cambiano i risultati!)
-    #     with pm.Model(coords=coords) as model:
-    #         actions_dataset = pt.as_tensor_variable(self.dataset['actions'])
-
-    #         crimes_init_obs = pm.Data("crimes_init_obs", np.zeros(self.areas), dims=('areas',))
-    #         lambdas_init = pm.Uniform('lambdas_init', 0, self.max_crimes, dims=('areas',))
-    #         crimes_init = pm.Poisson('crimes_init', lambdas_init, observed=crimes_init_obs)
-
-    #         crimes_obs = pm.Data('crimes_obs', np.zeros((len(self.dataset['crimes'])-1, self.areas)), dims=('steps', 'areas',))
-    #         crimes = pm.CustomDist(
-    #             'crimes_dist',
-    #             lambdas_init,
-    #             actions_dataset,
-    #             self.dynamic_factor,
-    #             self.max_crimes,
-    #             dist=crime_dist,
-    #             observed=crimes_obs
-    #         )
-
-    #         crimes_init = crimes_init.reshape((1, self.areas))
-    #         crimes = pm.Deterministic("crimes", pt.concatenate([crimes_init, crimes], axis=0), dims=('observations', 'areas',))
-
-    #     crimes_init_obs.set_value(np.array(self.dataset['crimes'][0]))
-    #     crimes_obs.set_value(np.array(self.dataset['crimes'][1:]))
-
-    #     with model:
-
-    #         print("Start sampling")
-    #         start = time.time()
-    #         trace = pm.sample(draws=1000, tune=1000, cores=1, chains=4, progressbar=LOG_PYMC)
-    #         end = time.time()
-    #         print("End sampling")
-    #         print(end - start, "time in seconds")
-    #         pred_lambdas = trace.posterior['lambdas_init'].mean(axis=(0, 1)).to_numpy()
-    #         print(f"Predicted initial lambdas: {pred_lambdas}")
-    #         exit()
-
-    #     # TODO: vedere come usare il lambda backtracker che funzia sopra
-    #     action = np.random.multinomial(self.resources, pred_lambdas / np.sum(pred_lambdas))
-    #     info_agent = {
-    #         "pred_lambdas": pred_lambdas
-    #     }
-    #     # print(pred_lambdas)
-    #     # print(np.random.multinomial(self.resources, pred_lambdas / np.sum(pred_lambdas)))
-
-    #     # update dataset with the action taken 
-    #     self.dataset['actions'].append(action)
-    #     return action, info_agent
-    ### ###
-
 
 
 class FairAgent(StaticMLEAgent):
+    """Agent proposed in the paper "Fair Algorithms for Learning in Allocation Problems" to obtain an
+       alpha-fair allocation while maximizing utility
+    """
     def __init__(self, resources, areas, burnin_steps, max_crimes, mle_interval, alpha):
+        """Constructor
+
+        Args:
+            alpha (float): upper bound on the difference in discovery probability between any two areas
+        """
         super().__init__(resources, areas, burnin_steps, max_crimes, mle_interval)
         self.alpha = alpha
         self.lambdas = [0.0 for _ in range(areas)]
+        self.allocation = None
 
     def act(self, state, timestep):
         if timestep != 0:
@@ -241,7 +138,7 @@ class FairAgent(StaticMLEAgent):
             if timestep % self.mle_interval == 0 or timestep == self.burnin_steps:
                 self.lambdas = self.compute_mle_lambdas()
                 self.allocation = self._optimal_fair_allocation()
-
+                
             action = self.allocation
             for area in range(self.areas):
                 self.dataset['actions'][area].append(action[area])
@@ -251,14 +148,19 @@ class FairAgent(StaticMLEAgent):
         return action, info_agent
 
     def _optimal_fair_allocation(self):
+        """Implements algorithm 1 from the paper to obtain an alpha-fair allocation while maximizing utility
+
+        Returns:
+            np.array: the allocation
+        """
+        # initialization
         opt_fair_allocation = np.zeros(self.areas)
         max_utility = -1
         upper_bounds = np.ones(self.areas) * self.resources
         lower_bounds = np.zeros(self.areas)
 
-        print(f"Beliefs {self.lambdas}")
-
         # build tables to optimize runtime
+        # discovery probability table for every combination of area (with a given lambda) and resources allocated to it
         disc_probability_table = np.zeros((self.areas, self.resources+1))
         domain = np.arange(self.max_crimes+1)
         for area in range(self.areas):
@@ -266,39 +168,42 @@ class FairAgent(StaticMLEAgent):
             for res in range(self.resources+1):
                 disc_probability_table[area, res] = utils.discovery_prob(res, pmf, domain)
 
-
-
+        # table of tail probabilities for every area and resource allocated to that area
         tail_prob_table = np.zeros((self.areas, self.resources+1))
         for area in range(self.areas):
             tail_prob_table[area] = utils.tail_prob(np.array(range(1, self.resources+2)), self.lambdas[area])
 
 
+        # try all possible areas as the one with the highest discovery probability
         for area in range(self.areas):
             allocation = np.zeros(self.areas, dtype=np.int32)
 
+            # try all possible allocations of resources to the area
             for res in range(self.resources+1):
                 allocation[area] = res
                 disc_probability = disc_probability_table[area, res]
                 upper_bounds[area] = res
                 lower_bounds[area] = res
 
-                # print(f"Area {area}, resource {res}, disc_probability {disc_probability}")
-
                 feasible = True
                 for other_area in range(self.areas):
                     if other_area != area:
+                        # compute range of resources that satisfy the fairness constraint
                         res_in_bounds = np.where(np.logical_and(disc_probability_table[other_area] >= disc_probability - self.alpha, disc_probability_table[other_area] <= disc_probability))
                         if res_in_bounds[0].shape[0] == 0:
                             feasible = False
                             break
-
+                        
+                        # update bounds and assign lower bound to allocation
                         upper_bounds[other_area] = res_in_bounds[0][-1]
                         lower_bounds[other_area] = res_in_bounds[0][0]
                         allocation[other_area] = lower_bounds[other_area]
 
+                # skip if allocation is not feasible or if it exceeds the total resources
                 if allocation.sum() > self.resources or not feasible:
                     continue    
                 
+                # greedily allocate remaining resources to maximize increase in utility through increase in tail probability
                 res_left = self.resources - allocation.sum()
                 for _ in range(res_left):
                     delta_tails = np.ones(self.areas) * (-np.inf)
@@ -309,13 +214,146 @@ class FairAgent(StaticMLEAgent):
                     best_greedy_area = np.argmax(delta_tails)
                     allocation[best_greedy_area] += 1
 
-
+                # compute utility of allocation
                 allocation_utility = utils.utility(allocation, self.lambdas)
 
+                # update optimal allocation
                 if allocation_utility > max_utility:
                     max_utility = allocation_utility
                     opt_fair_allocation = copy.deepcopy(allocation)
                 
-        print(f"Chosen fair allocation {opt_fair_allocation}, with utility: {max_utility}\n")
         return opt_fair_allocation
     
+
+
+
+def round_series_retain_integer_sum(xs, new_sum):
+    """Normalizes and scale the input serie to sum to new_sum, 
+       then rounds the values to integers while retaining the sum, 
+       minimizing the error in the integer approximation (L1 distance between the two series).
+
+    Args:
+        xs (iterable[float], list or np.array): the serie of floats
+        new_sum (int): new desired sum of the series
+
+    Returns:
+        np.array[int]: the rounded serie
+    """
+    xs = (xs / np.sum(xs)) * new_sum
+    N = round(np.sum(xs))
+    Rs = [int(x) for x in xs]
+    K = N - sum(Rs)
+    assert K == int(K), f"K is not an integer: {K}"
+    fs = [x - int(x) for x in xs]
+    indices = [i for order, (e, i) in enumerate(reversed(sorted((e,i) for i,e in enumerate(fs)))) if order < K]
+    ys = np.array([R + 1 if i in indices else R for i,R in enumerate(Rs)])
+
+    assert np.sum(ys) == new_sum
+    return ys
+
+class SteeringAgent(FairAgent):
+    """Proposed agent that steers the distribution of crimes by reallocating patrols to areas with higher lambda
+       in order to deal with the dynamic environment
+    """
+    def __init__(self, resources, areas, burnin_steps, max_crimes, mle_interval, alpha, steering_factor, exploiting_range):
+        """Constructor
+
+        Args:
+            steering_factor (float): factor governing the steering by means of reallocating resources to areas with higher lambda
+            exploiting_range (float): range of relative distance from the mean lambda to exploit using the fair algorithm of FairAgent
+        """
+        super().__init__(resources, areas, burnin_steps, max_crimes, mle_interval, alpha)
+        self.steering_factor = steering_factor
+        self.exploiting_range = exploiting_range
+
+    def act(self, state, timestep):
+        # update dataset
+        if timestep != 0:
+            for area in range(self.areas):
+                self.dataset['crimes'][area].append(state[area])
+
+        if timestep < self.burnin_steps:
+            action = np.random.multinomial(self.resources, np.ones(self.areas) / self.areas)
+            for area in range(self.areas):
+                self.dataset['actions'][area].append(action[area])
+
+            info_agent = {}
+
+        else:
+            if timestep % self.mle_interval == 0 or timestep == self.burnin_steps:
+                self.lambdas = self.compute_mle_lambdas_dynamic(window=self.burnin_steps)
+
+                # if the lambdas are close to the mean, exploit the fair algorithm, otherwise steer the allocation
+                average_rel_dist_from_mean_lambda = np.mean(np.abs(self.lambdas - np.mean(self.lambdas)) / np.mean(self.lambdas))
+                if average_rel_dist_from_mean_lambda < self.exploiting_range:
+                    self.allocation = self._optimal_fair_allocation()
+                else:
+                    self.allocation = round_series_retain_integer_sum(self.lambdas, self.resources)
+                    self.allocation = self._steering_allocation(self.allocation)
+                
+            action = self.allocation
+            for area in range(self.areas):
+                self.dataset['actions'][area].append(action[area])
+
+            info_agent = {"pred_lambdas": self.lambdas}
+
+        return action, info_agent
+    
+
+    def compute_mle_lambdas_dynamic(self, window):
+        """Runs MLE on the dataset, but only on the last "window"-observations
+
+        Args:
+            window (int): number of most recent datapoints to consider
+
+        Returns:
+            np.array[float]: the array of estimated lambdas
+        """
+        for area in range(self.areas):
+            self.dataset['actions'][area] = self.dataset['actions'][area][-window:]
+            self.dataset['crimes'][area] = self.dataset['crimes'][area][-window:]
+
+        return self.compute_mle_lambdas()
+
+    def _steering_allocation(self, allocation):
+        """Computes the steering allocation by reallocating resources to areas with higher lambda
+
+        Args:
+            allocation (np.array[int]): the allocation before steering
+
+        Returns:
+            np.array[int]: the steering allocation
+        """
+        mean_lambdas = np.mean(self.lambdas)
+        directions = np.where(self.lambdas > mean_lambdas, 1, -1)
+
+        decay = np.tanh((np.abs(self.lambdas - mean_lambdas) / mean_lambdas) * 2)
+
+        uniques, counts = np.unique(directions, return_counts=True)
+        counts_dict = dict(zip(uniques, counts))
+
+        margin = np.array([round(self.steering_factor * decay[i]) if allocation[i] - round(self.steering_factor * decay[i]) > 1 else np.clip(int(allocation[i] - 1), a_min=0, a_max=None) for i in range(self.areas)])
+        margin = np.where(directions == -1, margin, 0)
+
+        reserved_resources = np.sum(margin)
+
+        base_redistribution = reserved_resources // counts_dict[1]
+        redistributed_resources = np.where(directions == 1, base_redistribution, -margin)
+
+        remainder = reserved_resources % counts_dict[1]
+
+        if remainder > 0:
+            remainder_distribution = np.random.default_rng(42).multivariate_hypergeometric([1] * counts_dict[1], remainder)
+            assert np.sum(remainder_distribution) == remainder, "Remainder distribution is not correct"
+
+            j = 0
+            for i in range(self.areas):
+                if directions[i] == 1:
+                    redistributed_resources[i] += remainder_distribution[j]
+                    j += 1
+
+        steering_allocation = allocation + redistributed_resources
+
+        assert np.sum(steering_allocation) == self.resources, f"Resources are not all used, sum: {np.sum(steering_allocation)}"
+
+        return steering_allocation

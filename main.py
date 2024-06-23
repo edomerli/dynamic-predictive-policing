@@ -1,30 +1,61 @@
-from stable_baselines3.common.env_checker import check_env
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
+from tqdm import tqdm
+import sys
 
 from env import DynamicCrimeEnv
-from agents import FixedUniformAgent, SamplingUniformAgent, StaticMLEAgent, DynamicMLEAgent, FairAgent
+from agents import SamplingUniformAgent, StaticMLEAgent, FairAgent, SteeringAgent
 
-import logging
+# Command line arguments
+if len(sys.argv) < 2:
+    print("""
+          Usage: python main.py <city_name>
+            city_name: the name of the city to simulate (philadelphia, los_angeles)
+          """)
+    sys.exit(1)
 
-# TODO: remove
-# # Disable pymc logging
-# LOG_PYMC = False
-# if LOG_PYMC == False:
-#     logger = logging.getLogger("pymc.sampling")
-#     logger.propagate = False
+CITY_NAME = sys.argv[1]
+if CITY_NAME not in ["philadelphia", "los_angeles"]:
+    print("Invalid city name. Choose one of the following: philadelphia or los_angeles")
+    sys.exit(1)
 
-MAX_STEPS = 50
+
+# the philadelphia lambdas come from the paper "Fair Algorithms for Learning in Allocation Problems"
+# the los_angeles lambdas are computed using the notebook ./data/lambdas_exctractor.ipynb
+LAMBDAS_DB = {
+    "philadelphia": [11.35, 27.44, 20.37, 7.36, 22.67, 10.46, 17.25, 19.82, 30.96, 28.68, 43.49, 17.35, 17.40, 25.87, 33.42, 30.44, 38.46, 35.53, 20.54, 30.91, 23.23],
+    "los_angeles": [28.06, 39.67, 33.22, 25.05, 30.72, 29.58, 28.88, 23.48, 27.28, 24.81, 26.71, 29.38, 21.58, 24.19, 24.96, 36.7, 34.2, 29.79, 24.24, 19.54, 24.29],
+}
+
+### Configuration ###
+# Simulation
+MAX_STEPS = 700
+BURNIN_STEPS = 30
 SEED = 42
+DYNAMIC_FACTOR = 0.008
 
+# Data
+LAMBDAS = LAMBDAS_DB[CITY_NAME]
+
+# Fair agents
+ALPHA = 0.05
+STEERING_FACTOR = 5
+EXPLOITING_RANGE = 0.15
+#
+###
+
+
+### Static simulation ###
 ENV_CONFIG = {
-    "initial_lambdas": [11.35, 27.44, 20.37, 7.36, 22.67, 10.47, 17.26, 19.83, 30.97, 28.69, 43.5, 17.36, 17.41, 25.88, 33.43, 30.45, 38.47, 35.54, 20.55, 30.92, 23.24],
+    "initial_lambdas": LAMBDAS,
     "dynamic_factor": 0.0,
-    "resources": 500,
-    "max_crimes": 80,
+    "resources": int(round(sum(LAMBDAS))),
+    "max_crimes": int(round(max(LAMBDAS) * 2)),
     "max_t": MAX_STEPS
 }
+
+print(f"Total resources: {ENV_CONFIG['resources']}")
+print(f"Max crimes: {ENV_CONFIG['max_crimes']}")
 
 AGENT_CONFIG_BASIC = {
     "resources": ENV_CONFIG["resources"],
@@ -34,39 +65,24 @@ AGENT_CONFIG_BASIC = {
 AGENT_CONFIG_SOPH = {
     "resources": ENV_CONFIG["resources"],
     "areas": len(ENV_CONFIG["initial_lambdas"]), 
-    "burnin_steps": 10,
+    "burnin_steps": BURNIN_STEPS,
     "max_crimes": ENV_CONFIG["max_crimes"],
-    "mle_interval": 2,
+    "mle_interval": 1,
 }
 
 
 env = DynamicCrimeEnv(**ENV_CONFIG)
-# agent = DynamicMLEAgent(**AGENT_CONFIG)
 agents = [
-    FixedUniformAgent(**AGENT_CONFIG_BASIC), 
-    FixedUniformAgent(**AGENT_CONFIG_BASIC), # To double check seed, TODO: remove
     SamplingUniformAgent(**AGENT_CONFIG_BASIC), 
-    SamplingUniformAgent(**AGENT_CONFIG_BASIC),
     StaticMLEAgent(**AGENT_CONFIG_SOPH),
-    StaticMLEAgent(**AGENT_CONFIG_SOPH),
-    # DynamicMLEAgent(**AGENT_CONFIG_SOPH, dynamic_factor=ENV_CONFIG["dynamic_factor"]),
-    FairAgent(**AGENT_CONFIG_SOPH, alpha=0.05),
-    FairAgent(**AGENT_CONFIG_SOPH, alpha=0.05)
+    FairAgent(**AGENT_CONFIG_SOPH, alpha=ALPHA),
 ]
 
 agents_names = [
-    'fixed',
-    'fixed_copy',
-    'sampling_uniform',
-    'sampling_uniform_copy',
-    'static_mle',
-    'static_mle_copy',
-    # 'dynamic_mle',
+    'random_uniform',
+    'max_util',
     'fair',
-    'fair_copy'
 ]
-
-dataframes = []
 
 for agent, agent_name in zip(agents, agents_names):
     obs, info = env.reset(seed=SEED)
@@ -79,11 +95,10 @@ for agent, agent_name in zip(agents, agents_names):
         "accuracy": [],
         "equality_discovery_prob": [],
         "equality_wellness": [],
-        # "true_lambdas": [],
     }
 
-    for t in range(MAX_STEPS):
-        print(f"Agent {agent_name}, timestep {t}")
+    print(f"Starting simulation for agent {agent_name} and environment with dynamic factor {ENV_CONFIG['dynamic_factor']}")
+    for t in tqdm(range(MAX_STEPS)):
         action, info_agent = agent.act(obs, t)
 
         obs, reward, terminated, truncated, info_env = env.step(action)
@@ -91,34 +106,62 @@ for agent, agent_name in zip(agents, agents_names):
         for key in dataframe_dict.keys():
             dataframe_dict[key].append(info_env[key])
 
-        if terminated:
-            print(f"Episode terminated for agent {agent_name}")
+    dataframe = pd.DataFrame.from_dict(dataframe_dict)
+    filename = f"./outputs/{CITY_NAME}/df_{agent_name}"
+    dataframe.to_pickle(filename)
+
+    print(f"Simulation dataframe saved in {filename}")
+
+###
+
+
+### Dynamic simulation ###
+
+ENV_CONFIG['dynamic_factor'] = DYNAMIC_FACTOR
+
+
+env = DynamicCrimeEnv(**ENV_CONFIG)
+agents = [
+    SamplingUniformAgent(**AGENT_CONFIG_BASIC), 
+    StaticMLEAgent(**AGENT_CONFIG_SOPH),
+    FairAgent(**AGENT_CONFIG_SOPH, alpha=ALPHA),
+    SteeringAgent(**AGENT_CONFIG_SOPH, alpha=ALPHA, steering_factor=STEERING_FACTOR, exploiting_range=EXPLOITING_RANGE),
+]
+
+agents_names = [
+    'random_uniform',
+    'max_util',
+    'fair',
+    'steering',
+]
+
+for agent, agent_name in zip(agents, agents_names):
+    obs, info = env.reset(seed=SEED)
+    agent.seed(SEED)
+    terminated = False
+
+    dataframe_dict = {
+        "prevented_crimes": [],
+        "committed_crimes": [],
+        "accuracy": [],
+        "equality_discovery_prob": [],
+        "equality_wellness": [],
+    }
+
+    print(f"Starting simulation for agent {agent_name} and environment with dynamic factor {ENV_CONFIG['dynamic_factor']}")
+    for t in tqdm(range(MAX_STEPS)):
+        action, info_agent = agent.act(obs, t)
+
+        obs, reward, terminated, truncated, info_env = env.step(action)
+
+        for key in dataframe_dict.keys():
+            dataframe_dict[key].append(info_env[key])
 
     dataframe = pd.DataFrame.from_dict(dataframe_dict)
-    dataframe.to_pickle(f"df_{agent_name}")
+    filename = f"./outputs/{CITY_NAME}/df_{agent_name}_dynamic"
+    dataframe.to_pickle(filename)
 
-    dataframes.append(dataframe)
-
-
-fig = plt.figure()
-
-for df, label in zip(dataframes, agents_names):
-    plt.plot(np.arange(MAX_STEPS), df['equality_discovery_prob'], label=label)
-
-plt.title("Equality of discovery probability")
-plt.legend(loc="upper right")
-plt.show()
-
-for df, label in zip(dataframes, agents_names):
-    plt.plot(np.arange(MAX_STEPS), df['accuracy'], label=label)
-
-plt.title("Accuracy")
-plt.legend(loc="upper right")
-plt.show()
-
-# TODO: plot means of each field in a barplot
-
-
+    print(f"Simulation dataframe saved in {filename}")
 
 
 
